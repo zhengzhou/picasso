@@ -12,22 +12,27 @@ For more information please see [the website][1]
 Download
 --------
 
-Download [the latest JAR][2] or grab via Maven:
-
+Download [the latest JAR][2] or grab via Gradle:
+```groovy
+compile 'com.squareup.picasso:picasso:2.4.0'
+```
+or Maven:
 ```xml
 <dependency>
-    <groupId>com.squareup.picasso</groupId>
-    <artifactId>picasso</artifactId>
-    <version>(insert latest version)</version>
+  <groupId>com.squareup.picasso</groupId>
+  <artifactId>picasso</artifactId>
+  <version>2.4.0</version>
 </dependency>
 ```
+
+Snapshots of the development version are available in [Sonatype's `snapshots` repository][snap].
+
 
 
 ProGuard
 --------
 
-If you are using ProGuard make sure you add the following option:
-
+If you are using ProGuard you might need to add the following option:
 ```
 -dontwarn com.squareup.okhttp.**
 ```
@@ -53,4 +58,5 @@ License
 
 
  [1]: http://square.github.io/picasso/
- [2]: http://repository.sonatype.org/service/local/artifact/maven/redirect?r=central-proxy&g=com.squareup.picasso&a=picasso&v=LATEST
+ [2]: https://search.maven.org/remote_content?g=com.squareup.picasso&a=picasso&v=LATEST
+ [snap]: https://oss.sonatype.org/content/repositories/snapshots/

@@ -26,11 +26,14 @@ import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
 import android.os.Message;
-
 import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.WeakHashMap;
 import java.util.concurrent.ExecutorService;
 
 import static android.content.Context.CONNECTIVITY_SERVICE;
@@ -38,7 +41,20 @@ import static android.content.Intent.ACTION_AIRPLANE_MODE_CHANGED;
 import static android.net.ConnectivityManager.CONNECTIVITY_ACTION;
 import static android.os.Process.THREAD_PRIORITY_BACKGROUND;
 import static com.squareup.picasso.BitmapHunter.forRequest;
+import static com.squareup.picasso.MemoryPolicy.shouldWriteToMemoryCache;
+import static com.squareup.picasso.Utils.OWNER_DISPATCHER;
+import static com.squareup.picasso.Utils.VERB_BATCHED;
+import static com.squareup.picasso.Utils.VERB_CANCELED;
+import static com.squareup.picasso.Utils.VERB_DELIVERED;
+import static com.squareup.picasso.Utils.VERB_ENQUEUED;
+import static com.squareup.picasso.Utils.VERB_IGNORED;
+import static com.squareup.picasso.Utils.VERB_PAUSED;
+import static com.squareup.picasso.Utils.VERB_REPLAYING;
+import static com.squareup.picasso.Utils.VERB_RETRYING;
+import static com.squareup.picasso.Utils.getLogIdsForHunter;
 import static com.squareup.picasso.Utils.getService;
+import static com.squareup.picasso.Utils.hasPermission;
+import static com.squareup.picasso.Utils.log;
 
 class Dispatcher {
   private static final int RETRY_DELAY = 500;
@@ -55,6 +71,9 @@ class Dispatcher {
   static final int HUNTER_BATCH_COMPLETE = 8;
   static final int NETWORK_STATE_CHANGE = 9;
   static final int AIRPLANE_MODE_CHANGE = 10;
+  static final int TAG_PAUSE = 11;
+  static final int TAG_RESUME = 12;
+  static final int REQUEST_BATCH_RESUME = 13;
 
   private static final String DISPATCHER_THREAD_NAME = "Dispatcher";
   private static final int BATCH_DELAY = 200; // ms
@@ -64,14 +83,17 @@ class Dispatcher {
   final ExecutorService service;
   final Downloader downloader;
   final Map<String, BitmapHunter> hunterMap;
+  final Map<Object, Action> failedActions;
+  final Map<Object, Action> pausedActions;
+  final Set<Object> pausedTags;
   final Handler handler;
   final Handler mainThreadHandler;
   final Cache cache;
   final Stats stats;
   final List<BitmapHunter> batch;
   final NetworkBroadcastReceiver receiver;
+  final boolean scansNetworkChanges;
 
-  NetworkInfo networkInfo;
   boolean airplaneMode;
 
   Dispatcher(Context context, ExecutorService service, Handler mainThreadHandler,
@@ -81,6 +103,9 @@ class Dispatcher {
     this.context = context;
     this.service = service;
     this.hunterMap = new LinkedHashMap<String, BitmapHunter>();
+    this.failedActions = new WeakHashMap<Object, Action>();
+    this.pausedActions = new WeakHashMap<Object, Action>();
+    this.pausedTags = new HashSet<Object>();
     this.handler = new DispatcherHandler(dispatcherThread.getLooper(), this);
     this.downloader = downloader;
     this.mainThreadHandler = mainThreadHandler;
@@ -88,14 +113,24 @@ class Dispatcher {
     this.stats = stats;
     this.batch = new ArrayList<BitmapHunter>(4);
     this.airplaneMode = Utils.isAirplaneModeOn(this.context);
+    this.scansNetworkChanges = hasPermission(context, Manifest.permission.ACCESS_NETWORK_STATE);
     this.receiver = new NetworkBroadcastReceiver(this);
     receiver.register();
   }
 
   void shutdown() {
-    service.shutdown();
+    // Shutdown the thread pool only if it is the one created by Picasso.
+    if (service instanceof PicassoExecutorService) {
+      service.shutdown();
+    }
+    downloader.shutdown();
     dispatcherThread.quit();
-    receiver.unregister();
+    // Unregister network broadcast receiver on the main thread.
+    Picasso.HANDLER.post(new Runnable() {
+      @Override public void run() {
+        receiver.unregister();
+      }
+    });
   }
 
   void dispatchSubmit(Action action) {
@@ -104,6 +139,14 @@ class Dispatcher {
 
   void dispatchCancel(Action action) {
     handler.sendMessage(handler.obtainMessage(REQUEST_CANCEL, action));
+  }
+
+  void dispatchPauseTag(Object tag) {
+    handler.sendMessage(handler.obtainMessage(TAG_PAUSE, tag));
+  }
+
+  void dispatchResumeTag(Object tag) {
+    handler.sendMessage(handler.obtainMessage(TAG_RESUME, tag));
   }
 
   void dispatchComplete(BitmapHunter hunter) {
@@ -128,6 +171,19 @@ class Dispatcher {
   }
 
   void performSubmit(Action action) {
+    performSubmit(action, true);
+  }
+
+  void performSubmit(Action action, boolean dismissFailed) {
+    if (pausedTags.contains(action.getTag())) {
+      pausedActions.put(action.getTarget(), action);
+      if (action.getPicasso().loggingEnabled) {
+        log(OWNER_DISPATCHER, VERB_PAUSED, action.request.logId(),
+            "because tag '" + action.getTag() + "' is paused");
+      }
+      return;
+    }
+
     BitmapHunter hunter = hunterMap.get(action.getKey());
     if (hunter != null) {
       hunter.attach(action);
@@ -135,12 +191,22 @@ class Dispatcher {
     }
 
     if (service.isShutdown()) {
+      if (action.getPicasso().loggingEnabled) {
+        log(OWNER_DISPATCHER, VERB_IGNORED, action.request.logId(), "because shut down");
+      }
       return;
     }
 
-    hunter = forRequest(context, action.getPicasso(), this, cache, stats, action, downloader);
+    hunter = forRequest(action.getPicasso(), this, cache, stats, action);
     hunter.future = service.submit(hunter);
     hunterMap.put(action.getKey(), hunter);
+    if (dismissFailed) {
+      failedActions.remove(action.getTarget());
+    }
+
+    if (action.getPicasso().loggingEnabled) {
+      log(OWNER_DISPATCHER, VERB_ENQUEUED, action.request.logId());
+    }
   }
 
   void performCancel(Action action) {
@@ -150,7 +216,103 @@ class Dispatcher {
       hunter.detach(action);
       if (hunter.cancel()) {
         hunterMap.remove(key);
+        if (action.getPicasso().loggingEnabled) {
+          log(OWNER_DISPATCHER, VERB_CANCELED, action.getRequest().logId());
+        }
       }
+    }
+
+    if (pausedTags.contains(action.getTag())) {
+      pausedActions.remove(action.getTarget());
+      if (action.getPicasso().loggingEnabled) {
+        log(OWNER_DISPATCHER, VERB_CANCELED, action.getRequest().logId(),
+            "because paused request got canceled");
+      }
+    }
+
+    Action remove = failedActions.remove(action.getTarget());
+    if (remove != null && remove.getPicasso().loggingEnabled) {
+      log(OWNER_DISPATCHER, VERB_CANCELED, remove.getRequest().logId(), "from replaying");
+    }
+  }
+
+  void performPauseTag(Object tag) {
+    // Trying to pause a tag that is already paused.
+    if (!pausedTags.add(tag)) {
+      return;
+    }
+
+    // Go through all active hunters and detach/pause the requests
+    // that have the paused tag.
+    for (Iterator<BitmapHunter> it = hunterMap.values().iterator(); it.hasNext();) {
+      BitmapHunter hunter = it.next();
+      boolean loggingEnabled = hunter.getPicasso().loggingEnabled;
+
+      Action single = hunter.getAction();
+      List<Action> joined = hunter.getActions();
+      boolean hasMultiple = joined != null && !joined.isEmpty();
+
+      // Hunter has no requests, bail early.
+      if (single == null && !hasMultiple) {
+        continue;
+      }
+
+      if (single != null && single.getTag().equals(tag)) {
+        hunter.detach(single);
+        pausedActions.put(single.getTarget(), single);
+        if (loggingEnabled) {
+          log(OWNER_DISPATCHER, VERB_PAUSED, single.request.logId(),
+              "because tag '" + tag + "' was paused");
+        }
+      }
+
+      if (hasMultiple) {
+        for (int i = joined.size() - 1; i >= 0; i--) {
+          Action action = joined.get(i);
+          if (!action.getTag().equals(tag)) {
+            continue;
+          }
+
+          hunter.detach(action);
+          pausedActions.put(action.getTarget(), action);
+          if (loggingEnabled) {
+            log(OWNER_DISPATCHER, VERB_PAUSED, action.request.logId(),
+                "because tag '" + tag + "' was paused");
+          }
+        }
+      }
+
+      // Check if the hunter can be cancelled in case all its requests
+      // had the tag being paused here.
+      if (hunter.cancel()) {
+        it.remove();
+        if (loggingEnabled) {
+          log(OWNER_DISPATCHER, VERB_CANCELED, getLogIdsForHunter(hunter), "all actions paused");
+        }
+      }
+    }
+  }
+
+  void performResumeTag(Object tag) {
+    // Trying to resume a tag that is not paused.
+    if (!pausedTags.remove(tag)) {
+      return;
+    }
+
+    List<Action> batch = null;
+    for (Iterator<Action> i = pausedActions.values().iterator(); i.hasNext();) {
+      Action action = i.next();
+      if (action.getTag().equals(tag)) {
+        if (batch == null) {
+          batch = new ArrayList<Action>();
+        }
+        batch.add(action);
+        i.remove();
+      }
+    }
+
+    if (batch != null) {
+      mainThreadHandler.sendMessage(mainThreadHandler.obtainMessage(REQUEST_BATCH_RESUME, batch));
     }
   }
 
@@ -158,32 +320,73 @@ class Dispatcher {
     if (hunter.isCancelled()) return;
 
     if (service.isShutdown()) {
-      performError(hunter);
+      performError(hunter, false);
       return;
     }
 
-    if (hunter.shouldRetry(airplaneMode, networkInfo)) {
+    NetworkInfo networkInfo = null;
+    if (scansNetworkChanges) {
+      ConnectivityManager connectivityManager = getService(context, CONNECTIVITY_SERVICE);
+      networkInfo = connectivityManager.getActiveNetworkInfo();
+    }
+
+    boolean hasConnectivity = networkInfo != null && networkInfo.isConnected();
+    boolean shouldRetryHunter = hunter.shouldRetry(airplaneMode, networkInfo);
+    boolean supportsReplay = hunter.supportsReplay();
+
+    if (!shouldRetryHunter) {
+      // Mark for replay only if we observe network info changes and support replay.
+      boolean willReplay = scansNetworkChanges && supportsReplay;
+      performError(hunter, willReplay);
+      if (willReplay) {
+        markForReplay(hunter);
+      }
+      return;
+    }
+
+    // If we don't scan for network changes (missing permission) or if we have connectivity, retry.
+    if (!scansNetworkChanges || hasConnectivity) {
+      if (hunter.getPicasso().loggingEnabled) {
+        log(OWNER_DISPATCHER, VERB_RETRYING, getLogIdsForHunter(hunter));
+      }
+      //noinspection ThrowableResultOfMethodCallIgnored
+      if (hunter.getException() instanceof NetworkRequestHandler.ContentLengthException) {
+        hunter.networkPolicy |= NetworkPolicy.NO_CACHE.index;
+      }
       hunter.future = service.submit(hunter);
-    } else {
-      performError(hunter);
+      return;
+    }
+
+    performError(hunter, supportsReplay);
+
+    if (supportsReplay) {
+      markForReplay(hunter);
     }
   }
 
   void performComplete(BitmapHunter hunter) {
-    if (!hunter.shouldSkipMemoryCache()) {
+    if (shouldWriteToMemoryCache(hunter.getMemoryPolicy())) {
       cache.set(hunter.getKey(), hunter.getResult());
     }
     hunterMap.remove(hunter.getKey());
     batch(hunter);
+    if (hunter.getPicasso().loggingEnabled) {
+      log(OWNER_DISPATCHER, VERB_BATCHED, getLogIdsForHunter(hunter), "for completion");
+    }
   }
 
   void performBatchComplete() {
     List<BitmapHunter> copy = new ArrayList<BitmapHunter>(batch);
     batch.clear();
     mainThreadHandler.sendMessage(mainThreadHandler.obtainMessage(HUNTER_BATCH_COMPLETE, copy));
+    logBatch(copy);
   }
 
-  void performError(BitmapHunter hunter) {
+  void performError(BitmapHunter hunter, boolean willReplay) {
+    if (hunter.getPicasso().loggingEnabled) {
+      log(OWNER_DISPATCHER, VERB_BATCHED, getLogIdsForHunter(hunter),
+          "for error" + (willReplay ? " (will replay)" : ""));
+    }
     hunterMap.remove(hunter.getKey());
     batch(hunter);
   }
@@ -193,9 +396,49 @@ class Dispatcher {
   }
 
   void performNetworkStateChange(NetworkInfo info) {
-    networkInfo = info;
     if (service instanceof PicassoExecutorService) {
       ((PicassoExecutorService) service).adjustThreadCount(info);
+    }
+    // Intentionally check only if isConnected() here before we flush out failed actions.
+    if (info != null && info.isConnected()) {
+      flushFailedActions();
+    }
+  }
+
+  private void flushFailedActions() {
+    if (!failedActions.isEmpty()) {
+      Iterator<Action> iterator = failedActions.values().iterator();
+      while (iterator.hasNext()) {
+        Action action = iterator.next();
+        iterator.remove();
+        if (action.getPicasso().loggingEnabled) {
+          log(OWNER_DISPATCHER, VERB_REPLAYING, action.getRequest().logId());
+        }
+        performSubmit(action, false);
+      }
+    }
+  }
+
+  private void markForReplay(BitmapHunter hunter) {
+    Action action = hunter.getAction();
+    if (action != null) {
+      markForReplay(action);
+    }
+    List<Action> joined = hunter.getActions();
+    if (joined != null) {
+      //noinspection ForLoopReplaceableByForEach
+      for (int i = 0, n = joined.size(); i < n; i++) {
+        Action join = joined.get(i);
+        markForReplay(join);
+      }
+    }
+  }
+
+  private void markForReplay(Action action) {
+    Object target = action.getTarget();
+    if (target != null) {
+      action.willReplay = true;
+      failedActions.put(target, action);
     }
   }
 
@@ -206,6 +449,20 @@ class Dispatcher {
     batch.add(hunter);
     if (!handler.hasMessages(HUNTER_DELAY_NEXT_BATCH)) {
       handler.sendEmptyMessageDelayed(HUNTER_DELAY_NEXT_BATCH, BATCH_DELAY);
+    }
+  }
+
+  private void logBatch(List<BitmapHunter> copy) {
+    if (copy == null || copy.isEmpty()) return;
+    BitmapHunter hunter = copy.get(0);
+    Picasso picasso = hunter.getPicasso();
+    if (picasso.loggingEnabled) {
+      StringBuilder builder = new StringBuilder();
+      for (BitmapHunter bitmapHunter : copy) {
+        if (builder.length() > 0) builder.append(", ");
+        builder.append(Utils.getLogIdsForHunter(bitmapHunter));
+      }
+      log(OWNER_DISPATCHER, VERB_DELIVERED, builder.toString());
     }
   }
 
@@ -229,6 +486,16 @@ class Dispatcher {
           dispatcher.performCancel(action);
           break;
         }
+        case TAG_PAUSE: {
+          Object tag = msg.obj;
+          dispatcher.performPauseTag(tag);
+          break;
+        }
+        case TAG_RESUME: {
+          Object tag = msg.obj;
+          dispatcher.performResumeTag(tag);
+          break;
+        }
         case HUNTER_COMPLETE: {
           BitmapHunter hunter = (BitmapHunter) msg.obj;
           dispatcher.performComplete(hunter);
@@ -241,7 +508,7 @@ class Dispatcher {
         }
         case HUNTER_DECODE_FAILED: {
           BitmapHunter hunter = (BitmapHunter) msg.obj;
-          dispatcher.performError(hunter);
+          dispatcher.performError(hunter, false);
           break;
         }
         case HUNTER_DELAY_NEXT_BATCH: {
@@ -283,11 +550,9 @@ class Dispatcher {
     }
 
     void register() {
-      boolean shouldScanState = dispatcher.service instanceof PicassoExecutorService && //
-          Utils.hasPermission(dispatcher.context, Manifest.permission.ACCESS_NETWORK_STATE);
       IntentFilter filter = new IntentFilter();
       filter.addAction(ACTION_AIRPLANE_MODE_CHANGED);
-      if (shouldScanState) {
+      if (dispatcher.scansNetworkChanges) {
         filter.addAction(CONNECTIVITY_ACTION);
       }
       dispatcher.context.registerReceiver(this, filter);

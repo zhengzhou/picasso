@@ -24,13 +24,15 @@ import android.widget.RemoteViews;
 import static android.content.Context.NOTIFICATION_SERVICE;
 import static com.squareup.picasso.Utils.getService;
 
-abstract class RemoteViewsAction extends Action<Void> {
+abstract class RemoteViewsAction extends Action<RemoteViewsAction.RemoteViewsTarget> {
   final RemoteViews remoteViews;
   final int viewId;
 
+  private RemoteViewsTarget target;
+
   RemoteViewsAction(Picasso picasso, Request data, RemoteViews remoteViews, int viewId,
-      int errorResId, boolean skipCache, String key) {
-    super(picasso, null, data, skipCache, false, errorResId, null, key);
+      int errorResId, int memoryPolicy, int networkPolicy, Object tag, String key) {
+    super(picasso, null, data, memoryPolicy, networkPolicy, errorResId, null, key, tag, false);
     this.remoteViews = remoteViews;
     this.viewId = viewId;
   }
@@ -46,6 +48,13 @@ abstract class RemoteViewsAction extends Action<Void> {
     }
   }
 
+  @Override RemoteViewsTarget getTarget() {
+    if (target == null) {
+      target = new RemoteViewsTarget(remoteViews, viewId);
+    }
+    return target;
+  }
+
   void setImageResource(int resId) {
     remoteViews.setImageViewResource(viewId, resId);
     update();
@@ -53,12 +62,35 @@ abstract class RemoteViewsAction extends Action<Void> {
 
   abstract void update();
 
+  static class RemoteViewsTarget {
+    final RemoteViews remoteViews;
+    final int viewId;
+
+    RemoteViewsTarget(RemoteViews remoteViews, int viewId) {
+      this.remoteViews = remoteViews;
+      this.viewId = viewId;
+    }
+
+    @Override public boolean equals(Object o) {
+      if (this == o) return true;
+      if (o == null || getClass() != o.getClass()) return false;
+      RemoteViewsTarget remoteViewsTarget = (RemoteViewsTarget) o;
+      return viewId == remoteViewsTarget.viewId && remoteViews.equals(
+          remoteViewsTarget.remoteViews);
+    }
+
+    @Override public int hashCode() {
+      return 31 * remoteViews.hashCode() + viewId;
+    }
+  }
+
   static class AppWidgetAction extends RemoteViewsAction {
     private final int[] appWidgetIds;
 
     AppWidgetAction(Picasso picasso, Request data, RemoteViews remoteViews, int viewId,
-        int[] appWidgetIds, boolean skipCache, int errorResId, String key) {
-      super(picasso, data, remoteViews, viewId, errorResId, skipCache, key);
+        int[] appWidgetIds, int memoryPolicy, int networkPolicy, String key, Object tag,
+        int errorResId) {
+      super(picasso, data, remoteViews, viewId, errorResId, memoryPolicy, networkPolicy, tag, key);
       this.appWidgetIds = appWidgetIds;
     }
 
@@ -73,9 +105,9 @@ abstract class RemoteViewsAction extends Action<Void> {
     private final Notification notification;
 
     NotificationAction(Picasso picasso, Request data, RemoteViews remoteViews, int viewId,
-        int notificationId, Notification notification, boolean skipCache, int errorResId,
-        String key) {
-      super(picasso, data, remoteViews, viewId, errorResId, skipCache, key);
+        int notificationId, Notification notification, int memoryPolicy, int networkPolicy,
+        String key, Object tag, int errorResId) {
+      super(picasso, data, remoteViews, viewId, errorResId, memoryPolicy, networkPolicy, tag, key);
       this.notificationId = notificationId;
       this.notification = notification;
     }

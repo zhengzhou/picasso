@@ -11,14 +11,14 @@ import org.mockito.Mock;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
 
-import static com.squareup.picasso.MediaStoreBitmapHunter.PicassoKind.FULL;
-import static com.squareup.picasso.MediaStoreBitmapHunter.PicassoKind.MICRO;
-import static com.squareup.picasso.MediaStoreBitmapHunter.PicassoKind.MINI;
-import static com.squareup.picasso.MediaStoreBitmapHunter.getPicassoKind;
-import static com.squareup.picasso.TestUtils.IMAGE_THUMBNAIL_1;
+import static android.graphics.Bitmap.Config.ARGB_8888;
+import static com.squareup.picasso.MediaStoreRequestHandler.PicassoKind.FULL;
+import static com.squareup.picasso.MediaStoreRequestHandler.PicassoKind.MICRO;
+import static com.squareup.picasso.MediaStoreRequestHandler.PicassoKind.MINI;
+import static com.squareup.picasso.MediaStoreRequestHandler.getPicassoKind;
 import static com.squareup.picasso.TestUtils.MEDIA_STORE_CONTENT_1_URL;
 import static com.squareup.picasso.TestUtils.MEDIA_STORE_CONTENT_KEY_1;
-import static com.squareup.picasso.TestUtils.VIDEO_THUMBNAIL_1;
+import static com.squareup.picasso.TestUtils.makeBitmap;
 import static com.squareup.picasso.TestUtils.mockAction;
 import static org.fest.assertions.api.Assertions.assertThat;
 import static org.mockito.Matchers.any;
@@ -29,32 +29,32 @@ import static org.mockito.MockitoAnnotations.initMocks;
 @RunWith(RobolectricTestRunner.class) //
 @Config(manifest = Config.NONE,
     shadows = { Shadows.ShadowVideoThumbnails.class, Shadows.ShadowImageThumbnails.class })
-public class MediaStoreBitmapHunterTest {
+public class MediaStoreRequestHandlerTest {
 
   @Mock Context context;
-  @Mock Picasso picasso;
-  @Mock Dispatcher dispatcher;
-  @Mock Cache cache;
-  @Mock Stats stats;
 
   @Before public void setUp() {
     initMocks(this);
   }
 
   @Test public void decodesVideoThumbnailWithVideoMimeType() throws Exception {
-    Request request = new Request.Builder(MEDIA_STORE_CONTENT_1_URL, 0).resize(100, 100).build();
+    Bitmap bitmap = makeBitmap();
+    Request request =
+        new Request.Builder(MEDIA_STORE_CONTENT_1_URL, 0, ARGB_8888).resize(100, 100).build();
     Action action = mockAction(MEDIA_STORE_CONTENT_KEY_1, request);
-    MediaStoreBitmapHunter hunter = create("video/", action);
-    Bitmap result = hunter.decode(action.getData());
-    assertThat(result).isEqualTo(VIDEO_THUMBNAIL_1);
+    MediaStoreRequestHandler requestHandler = create("video/");
+    Bitmap result = requestHandler.load(action.getRequest(), 0).getBitmap();
+    assertThat(result).isEqualTo(bitmap);
   }
 
   @Test public void decodesImageThumbnailWithImageMimeType() throws Exception {
-    Request request = new Request.Builder(MEDIA_STORE_CONTENT_1_URL, 0).resize(100, 100).build();
+    Bitmap bitmap = makeBitmap(20, 20);
+    Request request =
+        new Request.Builder(MEDIA_STORE_CONTENT_1_URL, 0, ARGB_8888).resize(100, 100).build();
     Action action = mockAction(MEDIA_STORE_CONTENT_KEY_1, request);
-    MediaStoreBitmapHunter hunter = create("image/png", action);
-    Bitmap result = hunter.decode(action.getData());
-    assertThat(result).isEqualTo(IMAGE_THUMBNAIL_1);
+    MediaStoreRequestHandler requestHandler = create("image/png");
+    Bitmap result = requestHandler.load(action.getRequest(), 0).getBitmap();
+    assertThat(result).isEqualTo(bitmap);
   }
 
   @Test public void getPicassoKindMicro() throws Exception {
@@ -75,14 +75,14 @@ public class MediaStoreBitmapHunterTest {
     assertThat(getPicassoKind(96, 1000)).isEqualTo(FULL);
   }
 
-  private MediaStoreBitmapHunter create(String mimeType, Action action) {
+  private MediaStoreRequestHandler create(String mimeType) {
     ContentResolver contentResolver = mock(ContentResolver.class);
     when(contentResolver.getType(any(Uri.class))).thenReturn(mimeType);
-    return create(contentResolver, action);
+    return create(contentResolver);
   }
 
-  private MediaStoreBitmapHunter create(ContentResolver contentResolver, Action action) {
+  private MediaStoreRequestHandler create(ContentResolver contentResolver) {
     when(context.getContentResolver()).thenReturn(contentResolver);
-    return new MediaStoreBitmapHunter(context, picasso, dispatcher, cache, stats, action);
+    return new MediaStoreRequestHandler(context);
   }
 }

@@ -131,7 +131,7 @@ public class LruCacheTest {
     try {
       cache.get(null);
       fail("Expected NullPointerException");
-    } catch (NullPointerException e) {
+    } catch (NullPointerException expected) {
     }
   }
 
@@ -156,6 +156,26 @@ public class LruCacheTest {
     cache.set("c", C);
     cache.evictAll();
     assertThat(cache.map).isEmpty();
+  }
+
+  @Test public void clearPrefixedKey() {
+    LruCache cache = new LruCache(3);
+
+    cache.set("Hello\nAlice!", A);
+    cache.set("Hello\nBob!", B);
+    cache.set("Hello\nEve!", C);
+    cache.set("Hellos\nWorld!", D);
+
+    cache.clearKeyUri("Hello");
+    assertThat(cache.map).hasSize(1).containsKey("Hellos\nWorld!");
+  }
+
+  @Test public void invalidate() {
+    LruCache cache = new LruCache(3);
+    cache.set("Hello\nAlice!", A);
+    assertThat(cache.size()).isEqualTo(1);
+    cache.clearKeyUri("Hello");
+    assertThat(cache.size()).isZero();
   }
 
   private void assertHit(LruCache cache, String key, Bitmap value) {

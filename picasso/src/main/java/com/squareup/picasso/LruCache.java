@@ -17,8 +17,11 @@ package com.squareup.picasso;
 
 import android.content.Context;
 import android.graphics.Bitmap;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Map;
+
+import static com.squareup.picasso.Utils.KEY_SEPARATOR;
 
 /** A memory cache which uses a least-recently used eviction policy. */
 public class LruCache implements Cache {
@@ -110,18 +113,35 @@ public class LruCache implements Cache {
     trimToSize(-1); // -1 will evict 0-sized elements
   }
 
-  /** Returns the sum of the sizes of the entries in this cache. */
-  public final synchronized int size() {
+  @Override public final synchronized int size() {
     return size;
   }
 
-  /** Returns the maximum sum of the sizes of the entries in this cache. */
-  public final synchronized int maxSize() {
+  @Override public final synchronized int maxSize() {
     return maxSize;
   }
 
-  public final synchronized void clear() {
+  @Override public final synchronized void clear() {
     evictAll();
+  }
+
+  @Override public final synchronized void clearKeyUri(String uri) {
+    boolean sizeChanged = false;
+    int uriLength = uri.length();
+    for (Iterator<Map.Entry<String, Bitmap>> i = map.entrySet().iterator(); i.hasNext();) {
+      Map.Entry<String, Bitmap> entry = i.next();
+      String key = entry.getKey();
+      Bitmap value = entry.getValue();
+      int newlineIndex = key.indexOf(KEY_SEPARATOR);
+      if (newlineIndex == uriLength && key.substring(0, newlineIndex).equals(uri)) {
+        i.remove();
+        size -= Utils.getBitmapBytes(value);
+        sizeChanged = true;
+      }
+    }
+    if (sizeChanged) {
+      trimToSize(maxSize);
+    }
   }
 
   /** Returns the number of times {@link #get} returned a value. */

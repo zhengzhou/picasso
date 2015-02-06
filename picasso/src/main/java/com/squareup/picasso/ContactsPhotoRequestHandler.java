@@ -19,20 +19,18 @@ import android.annotation.TargetApi;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.UriMatcher;
-import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
 import android.net.Uri;
 import android.provider.ContactsContract;
-
 import java.io.IOException;
 import java.io.InputStream;
 
+import static android.content.ContentResolver.SCHEME_CONTENT;
 import static android.os.Build.VERSION.SDK_INT;
 import static android.os.Build.VERSION_CODES.ICE_CREAM_SANDWICH;
 import static android.provider.ContactsContract.Contacts.openContactPhotoInputStream;
 import static com.squareup.picasso.Picasso.LoadedFrom.DISK;
 
-class ContactsPhotoBitmapHunter extends BitmapHunter {
+class ContactsPhotoRequestHandler extends RequestHandler {
   /** A lookup uri (e.g. content://com.android.contacts/contacts/lookup/3570i61d948d30808e537) */
   private static final int ID_LOOKUP = 1;
   /** A contact thumbnail uri (e.g. content://com.android.contacts/contacts/38/photo) */
@@ -58,29 +56,24 @@ class ContactsPhotoBitmapHunter extends BitmapHunter {
 
   final Context context;
 
-  ContactsPhotoBitmapHunter(Context context, Picasso picasso, Dispatcher dispatcher, Cache cache,
-      Stats stats, Action action) {
-    super(picasso, dispatcher, cache, stats, action);
+  ContactsPhotoRequestHandler(Context context) {
     this.context = context;
   }
 
-  @Override Bitmap decode(Request data) throws IOException {
-    InputStream is = null;
-    try {
-      is = getInputStream();
-      return decodeStream(is, data);
-    } finally {
-      Utils.closeQuietly(is);
-    }
+  @Override public boolean canHandleRequest(Request data) {
+    final Uri uri = data.uri;
+    return (SCHEME_CONTENT.equals(uri.getScheme())
+        && ContactsContract.Contacts.CONTENT_URI.getHost().equals(uri.getHost())
+        && !uri.getPathSegments().contains(ContactsContract.Contacts.Photo.CONTENT_DIRECTORY));
   }
 
-  @Override Picasso.LoadedFrom getLoadedFrom() {
-    return DISK;
+  @Override public Result load(Request request, int networkPolicy) throws IOException {
+    return new Result(getInputStream(request), DISK);
   }
 
-  private InputStream getInputStream() throws IOException {
+  private InputStream getInputStream(Request data) throws IOException {
     ContentResolver contentResolver = context.getContentResolver();
-    Uri uri = getData().uri;
+    Uri uri = data.uri;
     switch (matcher.match(uri)) {
       case ID_LOOKUP:
         uri = ContactsContract.Contacts.lookupContact(contentResolver, uri);
@@ -100,23 +93,6 @@ class ContactsPhotoBitmapHunter extends BitmapHunter {
       default:
         throw new IllegalStateException("Invalid uri: " + uri);
     }
-  }
-
-  private Bitmap decodeStream(InputStream stream, Request data) throws IOException {
-    if (stream == null) {
-      return null;
-    }
-    final BitmapFactory.Options options = createBitmapOptions(data);
-    if (requiresInSampleSize(options)) {
-      InputStream is = getInputStream();
-      try {
-        BitmapFactory.decodeStream(is, null, options);
-      } finally {
-        Utils.closeQuietly(is);
-      }
-      calculateInSampleSize(data.targetWidth, data.targetHeight, options);
-    }
-    return BitmapFactory.decodeStream(stream, null, options);
   }
 
   @TargetApi(ICE_CREAM_SANDWICH)

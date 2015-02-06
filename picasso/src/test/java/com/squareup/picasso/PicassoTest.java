@@ -17,7 +17,10 @@ package com.squareup.picasso;
 
 import android.content.Context;
 import android.graphics.Bitmap;
+import android.net.Uri;
 import android.widget.ImageView;
+import android.widget.RemoteViews;
+import java.io.File;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.concurrent.ExecutorService;
@@ -29,11 +32,13 @@ import org.robolectric.Robolectric;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
 
+import static android.graphics.Bitmap.Config.ARGB_8888;
 import static com.squareup.picasso.Picasso.Listener;
 import static com.squareup.picasso.Picasso.LoadedFrom.MEMORY;
-import static com.squareup.picasso.TestUtils.BITMAP_1;
+import static com.squareup.picasso.RemoteViewsAction.RemoteViewsTarget;
 import static com.squareup.picasso.TestUtils.URI_1;
 import static com.squareup.picasso.TestUtils.URI_KEY_1;
+import static com.squareup.picasso.TestUtils.makeBitmap;
 import static com.squareup.picasso.TestUtils.mockAction;
 import static com.squareup.picasso.TestUtils.mockCanceledAction;
 import static com.squareup.picasso.TestUtils.mockDeferredRequestCreator;
@@ -60,19 +65,22 @@ public class PicassoTest {
   @Mock Downloader downloader;
   @Mock Dispatcher dispatcher;
   @Mock Picasso.RequestTransformer transformer;
+  @Mock RequestHandler requestHandler;
   @Mock Cache cache;
   @Mock Listener listener;
   @Mock Stats stats;
 
   private Picasso picasso;
+  final Bitmap bitmap = makeBitmap();
 
   @Before public void setUp() {
     initMocks(this);
-    picasso = new Picasso(context, dispatcher, cache, listener, transformer, stats, false);
+    picasso = new Picasso(context, dispatcher, cache, listener, transformer, null, stats, ARGB_8888,
+        false, false);
   }
 
   @Test public void submitWithNullTargetInvokesDispatcher() throws Exception {
-    Action action = mockAction(URI_KEY_1, URI_1, null);
+    Action action = mockAction(URI_KEY_1, URI_1);
     picasso.enqueueAndSubmit(action);
     assertThat(picasso.targetToAction).isEmpty();
     verify(dispatcher).dispatchSubmit(action);
@@ -86,10 +94,20 @@ public class PicassoTest {
     verify(dispatcher).dispatchSubmit(action);
   }
 
+  @Test public void submitWithSameActionDoesNotCancel() throws Exception {
+    Action action = mockAction(URI_KEY_1, URI_1, mockImageViewTarget());
+    picasso.enqueueAndSubmit(action);
+    verify(dispatcher).dispatchSubmit(action);
+    assertThat(picasso.targetToAction).hasSize(1).containsValue(action);
+    picasso.enqueueAndSubmit(action);
+    verify(action, never()).cancel();
+    verify(dispatcher, never()).dispatchCancel(action);
+  }
+
   @Test public void quickMemoryCheckReturnsBitmapIfInCache() throws Exception {
-    when(cache.get(URI_KEY_1)).thenReturn(BITMAP_1);
+    when(cache.get(URI_KEY_1)).thenReturn(bitmap);
     Bitmap cached = picasso.quickMemoryCacheCheck(URI_KEY_1);
-    assertThat(cached).isEqualTo(BITMAP_1);
+    assertThat(cached).isEqualTo(bitmap);
     verify(stats).dispatchCacheHit();
   }
 
@@ -102,12 +120,12 @@ public class PicassoTest {
   @Test public void completeInvokesSuccessOnAllSuccessfulRequests() throws Exception {
     Action action1 = mockAction(URI_KEY_1, URI_1, mockImageViewTarget());
     Action action2 = mockCanceledAction();
-    BitmapHunter hunter = mockHunter(URI_KEY_1, BITMAP_1, false);
+    BitmapHunter hunter = mockHunter(URI_KEY_1, bitmap, false);
     when(hunter.getActions()).thenReturn(Arrays.asList(action1, action2));
     when(hunter.getLoadedFrom()).thenReturn(MEMORY);
     picasso.complete(hunter);
-    verify(action1).complete(BITMAP_1, MEMORY);
-    verify(action2, never()).complete(eq(BITMAP_1), any(Picasso.LoadedFrom.class));
+    verify(action1).complete(bitmap, MEMORY);
+    verify(action2, never()).complete(eq(bitmap), any(Picasso.LoadedFrom.class));
   }
 
   @Test public void completeInvokesErrorOnAllFailedRequests() throws Exception {
@@ -125,28 +143,41 @@ public class PicassoTest {
 
   @Test public void completeDeliversToSingle() throws Exception {
     Action action = mockAction(URI_KEY_1, URI_1, mockImageViewTarget());
-    BitmapHunter hunter = mockHunter(URI_KEY_1, BITMAP_1, false);
+    BitmapHunter hunter = mockHunter(URI_KEY_1, bitmap, false);
     when(hunter.getLoadedFrom()).thenReturn(MEMORY);
     when(hunter.getAction()).thenReturn(action);
     when(hunter.getActions()).thenReturn(Collections.<Action>emptyList());
     picasso.complete(hunter);
-    verify(action).complete(BITMAP_1, MEMORY);
+    verify(action).complete(bitmap, MEMORY);
+  }
+
+  @Test public void completeWithReplayDoesNotRemove() throws Exception {
+    Action action = mockAction(URI_KEY_1, URI_1, mockImageViewTarget());
+    when(action.willReplay()).thenReturn(true);
+    BitmapHunter hunter = mockHunter(URI_KEY_1, bitmap, false);
+    when(hunter.getLoadedFrom()).thenReturn(MEMORY);
+    when(hunter.getAction()).thenReturn(action);
+    picasso.enqueueAndSubmit(action);
+    assertThat(picasso.targetToAction).hasSize(1);
+    picasso.complete(hunter);
+    assertThat(picasso.targetToAction).hasSize(1);
+    verify(action).complete(bitmap, MEMORY);
   }
 
   @Test public void completeDeliversToSingleAndMultiple() throws Exception {
     Action action = mockAction(URI_KEY_1, URI_1, mockImageViewTarget());
     Action action2 = mockAction(URI_KEY_1, URI_1, mockImageViewTarget());
-    BitmapHunter hunter = mockHunter(URI_KEY_1, BITMAP_1, false);
+    BitmapHunter hunter = mockHunter(URI_KEY_1, bitmap, false);
     when(hunter.getLoadedFrom()).thenReturn(MEMORY);
     when(hunter.getAction()).thenReturn(action);
     when(hunter.getActions()).thenReturn(Arrays.asList(action2));
     picasso.complete(hunter);
-    verify(action).complete(BITMAP_1, MEMORY);
-    verify(action2).complete(BITMAP_1, MEMORY);
+    verify(action).complete(bitmap, MEMORY);
+    verify(action2).complete(bitmap, MEMORY);
   }
 
   @Test public void completeSkipsIfNoActions() throws Exception {
-    BitmapHunter hunter = mockHunter(URI_KEY_1, BITMAP_1, false);
+    BitmapHunter hunter = mockHunter(URI_KEY_1, bitmap, false);
     picasso.complete(hunter);
     verify(hunter).getAction();
     verify(hunter).getActions();
@@ -155,17 +186,26 @@ public class PicassoTest {
 
   @Test public void loadedFromIsNullThrows() throws Exception {
     Action action = mockAction(URI_KEY_1, URI_1, mockImageViewTarget());
-    BitmapHunter hunter = mockHunter(URI_KEY_1, BITMAP_1, false);
+    BitmapHunter hunter = mockHunter(URI_KEY_1, bitmap, false);
     when(hunter.getAction()).thenReturn(action);
-    boolean caught = false;
     try {
       picasso.complete(hunter);
-    } catch (AssertionError error) {
-      caught = true;
-    }
-    if (!caught) {
       fail("Calling complete() with null LoadedFrom should throw");
+    } catch (AssertionError expected) {
     }
+  }
+
+  @Test public void resumeActionTriggersSubmitOnPausedAction() {
+    Action action = mockAction(URI_KEY_1, URI_1);
+    picasso.resumeAction(action);
+    verify(dispatcher).dispatchSubmit(action);
+  }
+
+  @Test public void resumeActionImmediatelyCompletesCachedRequest() {
+    when(cache.get(URI_KEY_1)).thenReturn(bitmap);
+    Action action = mockAction(URI_KEY_1, URI_1);
+    picasso.resumeAction(action);
+    verify(action).complete(bitmap, MEMORY);
   }
 
   @Test public void cancelExistingRequestWithUnknownTarget() throws Exception {
@@ -206,6 +246,20 @@ public class PicassoTest {
     verify(dispatcher).dispatchCancel(action);
   }
 
+  @Test public void cancelExistingRequestWithRemoteViewTarget() throws Exception {
+    int layoutId = 0;
+    int viewId = 1;
+    RemoteViews remoteViews = new RemoteViews("packageName", layoutId);
+    RemoteViewsTarget target = new RemoteViewsTarget(remoteViews, viewId);
+    Action action = mockAction(URI_KEY_1, URI_1, target);
+    picasso.enqueueAndSubmit(action);
+    assertThat(picasso.targetToAction).hasSize(1);
+    picasso.cancelRequest(remoteViews, viewId);
+    assertThat(picasso.targetToAction).isEmpty();
+    verify(action).cancel();
+    verify(dispatcher).dispatchCancel(action);
+  }
+
   @Test public void deferAddsToMap() throws Exception {
     ImageView target = mockImageViewTarget();
     DeferredRequestCreator deferredRequestCreator = mockDeferredRequestCreator();
@@ -232,12 +286,60 @@ public class PicassoTest {
   }
 
   @Test public void shutdownDisallowedOnSingletonInstance() throws Exception {
+    Picasso.singleton = null;
     try {
       Picasso picasso = Picasso.with(Robolectric.application);
       picasso.shutdown();
       fail("Calling shutdown() on static singleton instance should throw");
     } catch (UnsupportedOperationException expected) {
     }
+  }
+
+  @Test public void shutdownDisallowedOnCustomSingletonInstance() throws Exception {
+    Picasso.singleton = null;
+    try {
+      Picasso picasso = new Picasso.Builder(Robolectric.application).build();
+      Picasso.setSingletonInstance(picasso);
+      picasso.shutdown();
+      fail("Calling shutdown() on static singleton instance should throw");
+    } catch (UnsupportedOperationException expected) {
+    }
+  }
+
+  @Test public void setSingletonInstanceMayOnlyBeCalledOnce() {
+    Picasso.singleton = null;
+
+    Picasso picasso = new Picasso.Builder(Robolectric.application).build();
+    Picasso.setSingletonInstance(picasso);
+
+    try {
+      Picasso.setSingletonInstance(picasso);
+      fail("Can't set singleton instance twice.");
+    } catch (IllegalStateException e) {
+      assertThat(e).hasMessage("Singleton instance already exists.");
+    }
+  }
+
+  @Test public void setSingletonInstanceAfterWithFails() {
+    Picasso.singleton = null;
+
+    // Implicitly create the default singleton instance.
+    Picasso.with(Robolectric.application);
+
+    Picasso picasso = new Picasso.Builder(Robolectric.application).build();
+    try {
+      Picasso.setSingletonInstance(picasso);
+      fail("Can't set singleton instance after with().");
+    } catch (IllegalStateException e) {
+      assertThat(e).hasMessage("Singleton instance already exists.");
+    }
+  }
+
+  @Test public void setSingleInstanceReturnedFromWith() {
+    Picasso.singleton = null;
+    Picasso picasso = new Picasso.Builder(Robolectric.application).build();
+    Picasso.setSingletonInstance(picasso);
+    assertThat(Picasso.with(Robolectric.application)).isSameAs(picasso);
   }
 
   @Test public void shutdownClearsDeferredRequests() throws Exception {
@@ -353,6 +455,29 @@ public class PicassoTest {
     }
   }
 
+  @Test public void builderInvalidRequestHandler() throws Exception {
+    try {
+      new Picasso.Builder(context).addRequestHandler(null);
+      fail("Null request handler should throw exception.");
+    } catch (IllegalArgumentException expected) {
+    }
+    try {
+      new Picasso.Builder(context).addRequestHandler(requestHandler).addRequestHandler(requestHandler);
+      fail("Registering same request handler twice should throw exception.");
+    } catch (IllegalStateException expected) {
+    }
+  }
+
+  @Test public void builderWithoutRequestHandler() throws Exception {
+    Picasso picasso = new Picasso.Builder(Robolectric.application).build();
+    assertThat(picasso.getRequestHandlers()).isNotEmpty().doesNotContain(requestHandler);
+  }
+
+  @Test public void builderWithRequestHandler() throws Exception {
+    Picasso picasso = new Picasso.Builder(Robolectric.application).addRequestHandler(requestHandler).build();
+    assertThat(picasso.getRequestHandlers()).isNotNull().isNotEmpty().contains(requestHandler);
+  }
+
   @Test public void builderInvalidContext() throws Exception {
     try {
       new Picasso.Builder(null);
@@ -364,5 +489,20 @@ public class PicassoTest {
   @Test public void builderWithDebugIndicators() throws Exception {
     Picasso picasso = new Picasso.Builder(Robolectric.application).indicatorsEnabled(true).build();
     assertThat(picasso.areIndicatorsEnabled()).isTrue();
+  }
+
+  @Test public void invalidateString() {
+    picasso.invalidate("http://example.com");
+    verify(cache).clearKeyUri("http://example.com");
+  }
+
+  @Test public void invalidateFile() {
+    picasso.invalidate(new File("/foo/bar/baz"));
+    verify(cache).clearKeyUri("file:///foo/bar/baz");
+  }
+
+  @Test public void invalidateUri() {
+    picasso.invalidate(Uri.parse("mock://12345"));
+    verify(cache).clearKeyUri("mock://12345");
   }
 }

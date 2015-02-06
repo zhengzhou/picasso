@@ -15,7 +15,7 @@
  */
 package com.squareup.picasso;
 
-import android.R;
+import android.graphics.Bitmap;
 import android.widget.RemoteViews;
 import org.junit.Before;
 import org.junit.Test;
@@ -24,10 +24,11 @@ import org.robolectric.Robolectric;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
 
+import static android.graphics.Bitmap.Config.ARGB_8888;
 import static com.squareup.picasso.Picasso.LoadedFrom.NETWORK;
 import static com.squareup.picasso.Picasso.RequestTransformer.IDENTITY;
-import static com.squareup.picasso.TestUtils.BITMAP_1;
 import static com.squareup.picasso.TestUtils.URI_KEY_1;
+import static com.squareup.picasso.TestUtils.makeBitmap;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyZeroInteractions;
@@ -43,13 +44,14 @@ public class RemoteViewsActionTest {
   @Before public void setUp() {
     picasso = createPicasso();
     remoteViews = mock(RemoteViews.class);
-    when(remoteViews.getLayoutId()).thenReturn(R.layout.list_content);
+    when(remoteViews.getLayoutId()).thenReturn(android.R.layout.list_content);
   }
 
   @Test public void completeSetsBitmapOnRemoteViews() throws Exception {
+    Bitmap bitmap = makeBitmap();
     RemoteViewsAction action = createAction();
-    action.complete(BITMAP_1, NETWORK);
-    verify(remoteViews).setImageViewBitmap(1, BITMAP_1);
+    action.complete(bitmap, NETWORK);
+    verify(remoteViews).setImageViewBitmap(1, bitmap);
   }
 
   @Test public void errorWithNoResourceIsNoop() throws Exception {
@@ -69,19 +71,19 @@ public class RemoteViewsActionTest {
   }
 
   private TestableRemoteViewsAction createAction(int errorResId) {
-    return new TestableRemoteViewsAction(picasso, null, remoteViews, 1, errorResId, false,
+    return new TestableRemoteViewsAction(picasso, null, remoteViews, 1, errorResId, 0, 0, null,
         URI_KEY_1);
   }
 
   private Picasso createPicasso() {
-    return new Picasso(Robolectric.application, mock(Dispatcher.class), Cache.NONE, null, IDENTITY,
-        mock(Stats.class), true);
+    return new Picasso(Robolectric.application, mock(Dispatcher.class), Cache.NONE, null,
+        IDENTITY, null, mock(Stats.class), ARGB_8888, false, false);
   }
 
   static class TestableRemoteViewsAction extends RemoteViewsAction {
     TestableRemoteViewsAction(Picasso picasso, Request data, RemoteViews remoteViews, int viewId,
-        int errorResId, boolean skipCache, String key) {
-      super(picasso, data, remoteViews, viewId, errorResId, skipCache, key);
+        int errorResId, int memoryPolicy, int networkPolicy, String tag, String key) {
+      super(picasso, data, remoteViews, viewId, errorResId, memoryPolicy, networkPolicy, tag, key);
     }
 
     @Override void update() {

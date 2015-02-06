@@ -26,6 +26,7 @@ import android.os.Looper;
 import android.os.Process;
 import android.os.StatFs;
 import android.provider.Settings;
+import android.util.Log;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileNotFoundException;
@@ -41,19 +42,46 @@ import static android.os.Build.VERSION_CODES.HONEYCOMB;
 import static android.os.Build.VERSION_CODES.HONEYCOMB_MR1;
 import static android.os.Process.THREAD_PRIORITY_BACKGROUND;
 import static android.provider.Settings.System.AIRPLANE_MODE_ON;
+import static com.squareup.picasso.Picasso.TAG;
+import static java.lang.String.format;
 
 final class Utils {
   static final String THREAD_PREFIX = "Picasso-";
   static final String THREAD_IDLE_NAME = THREAD_PREFIX + "Idle";
-  static final int DEFAULT_READ_TIMEOUT = 20 * 1000; // 20s
-  static final int DEFAULT_CONNECT_TIMEOUT = 15 * 1000; // 15s
+  static final int DEFAULT_READ_TIMEOUT_MILLIS = 20 * 1000; // 20s
+  static final int DEFAULT_WRITE_TIMEOUT_MILLIS = 20 * 1000; // 20s
+  static final int DEFAULT_CONNECT_TIMEOUT_MILLIS = 15 * 1000; // 15s
   private static final String PICASSO_CACHE = "picasso-cache";
   private static final int KEY_PADDING = 50; // Determined by exact science.
   private static final int MIN_DISK_CACHE_SIZE = 5 * 1024 * 1024; // 5MB
   private static final int MAX_DISK_CACHE_SIZE = 50 * 1024 * 1024; // 50MB
+  static final char KEY_SEPARATOR = '\n';
 
   /** Thread confined to main thread for key creation. */
   static final StringBuilder MAIN_THREAD_KEY_BUILDER = new StringBuilder();
+
+  /** Logging */
+  static final String OWNER_MAIN = "Main";
+  static final String OWNER_DISPATCHER = "Dispatcher";
+  static final String OWNER_HUNTER = "Hunter";
+  static final String VERB_CREATED = "created";
+  static final String VERB_CHANGED = "changed";
+  static final String VERB_IGNORED = "ignored";
+  static final String VERB_ENQUEUED = "enqueued";
+  static final String VERB_CANCELED = "canceled";
+  static final String VERB_BATCHED = "batched";
+  static final String VERB_RETRYING = "retrying";
+  static final String VERB_EXECUTING = "executing";
+  static final String VERB_DECODED = "decoded";
+  static final String VERB_TRANSFORMED = "transformed";
+  static final String VERB_JOINED = "joined";
+  static final String VERB_REMOVED = "removed";
+  static final String VERB_DELIVERED = "delivered";
+  static final String VERB_REPLAYING = "replaying";
+  static final String VERB_COMPLETED = "completed";
+  static final String VERB_ERRORED = "errored";
+  static final String VERB_PAUSED = "paused";
+  static final String VERB_RESUMED = "resumed";
 
   /* WebP file header
      0                   1                   2                   3
@@ -87,16 +115,55 @@ final class Utils {
     return result;
   }
 
+  static <T> T checkNotNull(T value, String message) {
+    if (value == null) {
+      throw new NullPointerException(message);
+    }
+    return value;
+  }
+
   static void checkNotMain() {
-    if (Looper.getMainLooper().getThread() == Thread.currentThread()) {
+    if (isMain()) {
       throw new IllegalStateException("Method call should not happen from the main thread.");
     }
   }
 
   static void checkMain() {
-    if (Looper.getMainLooper().getThread() != Thread.currentThread()) {
+    if (!isMain()) {
       throw new IllegalStateException("Method call should happen from the main thread.");
     }
+  }
+
+  static boolean isMain() {
+    return Looper.getMainLooper().getThread() == Thread.currentThread();
+  }
+
+  static String getLogIdsForHunter(BitmapHunter hunter) {
+    return getLogIdsForHunter(hunter, "");
+  }
+
+  static String getLogIdsForHunter(BitmapHunter hunter, String prefix) {
+    StringBuilder builder = new StringBuilder(prefix);
+    Action action = hunter.getAction();
+    if (action != null) {
+      builder.append(action.request.logId());
+    }
+    List<Action> actions = hunter.getActions();
+    if (actions != null) {
+      for (int i = 0, count = actions.size(); i < count; i++) {
+        if (i > 0 || action != null) builder.append(", ");
+        builder.append(actions.get(i).request.logId());
+      }
+    }
+    return builder.toString();
+  }
+
+  static void log(String owner, String verb, String logId) {
+    log(owner, verb, logId, "");
+  }
+
+  static void log(String owner, String verb, String logId, String extras) {
+    Log.d(TAG, format("%1$-11s %2$-12s %3$s %4$s", owner, verb, logId, extras));
   }
 
   static String createKey(Request data) {
@@ -106,7 +173,10 @@ final class Utils {
   }
 
   static String createKey(Request data, StringBuilder builder) {
-    if (data.uri != null) {
+    if (data.stableKey != null) {
+      builder.ensureCapacity(data.stableKey.length() + KEY_PADDING);
+      builder.append(data.stableKey);
+    } else if (data.uri != null) {
       String path = data.uri.toString();
       builder.ensureCapacity(path.length() + KEY_PADDING);
       builder.append(path);
@@ -114,30 +184,30 @@ final class Utils {
       builder.ensureCapacity(KEY_PADDING);
       builder.append(data.resourceId);
     }
-    builder.append('\n');
+    builder.append(KEY_SEPARATOR);
 
     if (data.rotationDegrees != 0) {
       builder.append("rotation:").append(data.rotationDegrees);
       if (data.hasRotationPivot) {
         builder.append('@').append(data.rotationPivotX).append('x').append(data.rotationPivotY);
       }
-      builder.append('\n');
+      builder.append(KEY_SEPARATOR);
     }
-    if (data.targetWidth != 0) {
+    if (data.hasSize()) {
       builder.append("resize:").append(data.targetWidth).append('x').append(data.targetHeight);
-      builder.append('\n');
+      builder.append(KEY_SEPARATOR);
     }
     if (data.centerCrop) {
-      builder.append("centerCrop\n");
+      builder.append("centerCrop").append(KEY_SEPARATOR);
     } else if (data.centerInside) {
-      builder.append("centerInside\n");
+      builder.append("centerInside").append(KEY_SEPARATOR);
     }
 
     if (data.transformations != null) {
       //noinspection ForLoopReplaceableByForEach
       for (int i = 0, count = data.transformations.size(); i < count; i++) {
         builder.append(data.transformations.get(i).key());
-        builder.append('\n');
+        builder.append(KEY_SEPARATOR);
       }
     }
 
@@ -175,14 +245,15 @@ final class Utils {
     try {
       Class.forName("com.squareup.okhttp.OkHttpClient");
       return OkHttpLoaderCreator.create(context);
-    } catch (ClassNotFoundException e) {
-      return new UrlConnectionDownloader(context);
+    } catch (ClassNotFoundException ignored) {
     }
+    return new UrlConnectionDownloader(context);
   }
 
   static File createDefaultCacheDir(Context context) {
     File cache = new File(context.getApplicationContext().getCacheDir(), PICASSO_CACHE);
     if (!cache.exists()) {
+      //noinspection ResultOfMethodCallIgnored
       cache.mkdirs();
     }
     return cache;
@@ -216,7 +287,13 @@ final class Utils {
 
   static boolean isAirplaneModeOn(Context context) {
     ContentResolver contentResolver = context.getContentResolver();
-    return Settings.System.getInt(contentResolver, AIRPLANE_MODE_ON, 0) != 0;
+    try {
+      return Settings.System.getInt(contentResolver, AIRPLANE_MODE_ON, 0) != 0;
+    } catch (NullPointerException e) {
+      // https://github.com/square/picasso/issues/761, some devices might crash here, assume that
+      // airplane mode is off.
+      return false;
+    }
   }
 
   @SuppressWarnings("unchecked")
